@@ -1,0 +1,24 @@
+pipeline:
+  chunk_minutes: 10
+  window_seconds: 30
+  window_overlap_seconds: 15
+  output_dir: data/outputs
+  cache_dir: data/cache
+
+weights:
+  loudness_spike: 0.2
+  overlap_speech: 0.15
+  speech_rate_burst: 0.1
+  transcript_excitement: 0.2
+  motion_peak: 0.2
+  scene_change_rate: 0.15
+
+scoring:
+  strategy: hybrid
+  hybrid_alpha: 0.65
+
+llm:
+  provider: ollama
+  model: qwen2.5:7b-instruct-q4_K_M
+  endpoint: http://localhost:11434
+  timeout_seconds: 45
