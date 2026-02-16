@@ -13,6 +13,8 @@ def run_asr(
     language: str = "de",
     model_size: str = "small",
     chunk_seconds: int = 120,
+    device: str = "auto",
+    compute_type: str = "default",
 ) -> dict[str, Any]:
     """Transcribe an audio track with faster-whisper and persist ASR artifacts."""
 
@@ -28,7 +30,7 @@ def run_asr(
 
     from faster_whisper import WhisperModel
 
-    model = WhisperModel(model_size)
+    model = WhisperModel(model_size, device=device, compute_type=compute_type)
     normalized_segments: list[dict[str, Any]] = []
 
     chunk_starts = _build_chunk_starts(duration_seconds, chunk_seconds)
@@ -75,6 +77,8 @@ def run_asr(
         "cache_dir": str(asr_dir),
         "language": language,
         "model_size": model_size,
+        "device": device,
+        "compute_type": compute_type,
         "duration_seconds": duration_seconds,
         "chunk_seconds": chunk_seconds,
         "chunk_count": len(chunk_starts),
