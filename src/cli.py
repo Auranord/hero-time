@@ -201,6 +201,7 @@ def video_motion(
         help="Path to YAML configuration file.",
     ),
     analysis_fps: float = typer.Option(2.0, help="Sampling FPS for motion analysis."),
+    processing_width: int = typer.Option(320, help="Resize video width before motion scoring (<=0 disables resize)."),
 ) -> None:
     """Run low-FPS video motion/scene-change feature extraction."""
 
@@ -209,6 +210,7 @@ def video_motion(
         vod_path=vod_path,
         cache_dir=str(settings.pipeline.cache_dir),
         analysis_fps=analysis_fps,
+        processing_width=processing_width,
         window_seconds=settings.pipeline.window_seconds,
         window_overlap_seconds=settings.pipeline.window_overlap_seconds,
     )
@@ -333,6 +335,7 @@ def run_pipeline(
     language: str = typer.Option("de", help="Language code for ASR transcription."),
     model_size: str = typer.Option("small", help="Faster-whisper model size/name."),
     analysis_fps: float = typer.Option(2.0, help="Sampling FPS for video motion analysis."),
+    motion_processing_width: int = typer.Option(320, help="Resize width before motion scoring (<=0 disables resize)."),
     top_k: int = typer.Option(20, help="Maximum number of candidate windows before merge/cooldown."),
     rerank_top_n: int = typer.Option(0, help="Optional top-N candidates to rerank with local LLM."),
     hf_auth_token: str | None = typer.Option(None, help="Optional Hugging Face auth token for diarization."),
@@ -435,6 +438,7 @@ def run_pipeline(
                 vod_path=str(resolved_vod_path),
                 cache_dir=str(settings.pipeline.cache_dir),
                 analysis_fps=analysis_fps,
+                processing_width=motion_processing_width,
                 window_seconds=settings.pipeline.window_seconds,
                 window_overlap_seconds=settings.pipeline.window_overlap_seconds,
             ),

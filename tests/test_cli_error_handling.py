@@ -70,7 +70,11 @@ def test_run_command_shows_progress_for_all_stages(tmp_path: Path, monkeypatch) 
     monkeypatch.setattr(cli, "run_asr", lambda **_: {"transcript_path": "/tmp/asr.json"})
     monkeypatch.setattr(cli, "run_diarization", lambda **_: {"diarization_path": "/tmp/diarization.json"})
     monkeypatch.setattr(cli, "detect_audio_events", lambda **_: {"audio_events_path": "/tmp/audio_events.json"})
-    monkeypatch.setattr(cli, "analyze_video_motion", lambda **_: {"video_motion_path": "/tmp/video_motion.json"})
+
+    def _analyze_video_motion(**kwargs):
+        return {"video_motion_path": "/tmp/video_motion.json"}
+
+    monkeypatch.setattr(cli, "analyze_video_motion", _analyze_video_motion)
     monkeypatch.setattr(cli, "build_candidates_from_artifacts", lambda **_: [{"id": "clip-1"}])
     monkeypatch.setattr(
         cli,
@@ -93,6 +97,7 @@ def test_run_command_passes_device_flags_to_asr_and_diarization(tmp_path: Path, 
 
     captured_asr: dict[str, str] = {}
     captured_diar: dict[str, str] = {}
+    captured_motion: dict[str, int] = {}
 
     monkeypatch.setattr(cli, "_bootstrap", lambda _: _DummySettings())
     monkeypatch.setattr(cli, "probe_media", lambda **_: {"metadata_path": "/tmp/metadata.json"})
@@ -110,7 +115,12 @@ def test_run_command_passes_device_flags_to_asr_and_diarization(tmp_path: Path, 
     monkeypatch.setattr(cli, "run_asr", _run_asr)
     monkeypatch.setattr(cli, "run_diarization", _run_diarization)
     monkeypatch.setattr(cli, "detect_audio_events", lambda **_: {"audio_events_path": "/tmp/audio_events.json"})
-    monkeypatch.setattr(cli, "analyze_video_motion", lambda **_: {"video_motion_path": "/tmp/video_motion.json"})
+
+    def _analyze_video_motion(**kwargs):
+        captured_motion["processing_width"] = kwargs["processing_width"]
+        return {"video_motion_path": "/tmp/video_motion.json"}
+
+    monkeypatch.setattr(cli, "analyze_video_motion", _analyze_video_motion)
     monkeypatch.setattr(cli, "build_candidates_from_artifacts", lambda **_: [{"id": "clip-1"}])
     monkeypatch.setattr(
         cli,
@@ -129,9 +139,12 @@ def test_run_command_passes_device_flags_to_asr_and_diarization(tmp_path: Path, 
             "float16",
             "--diarization-device",
             "cuda:0",
+            "--motion-processing-width",
+            "224",
         ],
     )
 
     assert result.exit_code == 0
     assert captured_asr == {"device": "cuda", "compute_type": "float16"}
     assert captured_diar == {"device": "cuda:0"}
+    assert captured_motion == {"processing_width": 224}
