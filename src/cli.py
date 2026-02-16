@@ -139,6 +139,8 @@ def asr(
     language: str = typer.Option("de", help="Language code for transcription."),
     model_size: str = typer.Option("small", help="Faster-whisper model size/name."),
     chunk_seconds: int = typer.Option(120, help="Audio chunk size for transcription."),
+    device: str = typer.Option("auto", help="ASR device: auto, cpu, cuda, cuda:0, ..."),
+    compute_type: str = typer.Option("default", help="faster-whisper compute type: default, float16, int8, ..."),
 ) -> None:
     """Run chunked faster-whisper ASR and cache transcript artifacts."""
 
@@ -149,6 +151,8 @@ def asr(
         language=language,
         model_size=model_size,
         chunk_seconds=chunk_seconds,
+        device=device,
+        compute_type=compute_type,
     )
     logger.info("ASR completed for %s", audio_path)
     typer.echo(json.dumps(result, indent=2))
@@ -167,6 +171,7 @@ def diarize(
     transcript_path: Path | None = typer.Option(None, help="Optional ASR transcript.json for alignment."),
     hf_auth_token: str | None = typer.Option(None, help="Hugging Face auth token for pyannote model."),
     pipeline_model: str = typer.Option("pyannote/speaker-diarization-3.1", help="Pyannote pipeline model id."),
+    device: str = typer.Option("auto", help="Diarization device: auto, cpu, cuda, cuda:0, ..."),
 ) -> None:
     """Run speaker diarization and compute overlap statistics."""
 
@@ -179,6 +184,7 @@ def diarize(
         window_overlap_seconds=settings.pipeline.window_overlap_seconds,
         hf_auth_token=hf_auth_token,
         pipeline_model=pipeline_model,
+        device=device,
     )
     logger.info("Diarization completed for %s", audio_path)
     typer.echo(json.dumps(result, indent=2))
@@ -335,6 +341,9 @@ def run_pipeline(
         True,
         help="If diarization fails, continue with a synthetic single-speaker timeline so pipeline still completes.",
     ),
+    asr_device: str = typer.Option("auto", help="ASR device: auto, cpu, cuda, cuda:0, ..."),
+    asr_compute_type: str = typer.Option("default", help="faster-whisper compute type: default, float16, int8, ..."),
+    diarization_device: str = typer.Option("auto", help="Diarization device: auto, cpu, cuda, cuda:0, ..."),
 ) -> None:
     """Run the complete pipeline from a VOD file using project-local default paths."""
 
@@ -372,6 +381,8 @@ def run_pipeline(
                 language=language,
                 model_size=model_size,
                 chunk_seconds=int(settings.pipeline.chunk_minutes * 60),
+                device=asr_device,
+                compute_type=asr_compute_type,
             ),
         )
 
@@ -387,6 +398,7 @@ def run_pipeline(
                     window_overlap_seconds=settings.pipeline.window_overlap_seconds,
                     hf_auth_token=diarization_token,
                     pipeline_model=pipeline_model,
+                    device=diarization_device,
                 )
             except Exception as exc:
                 if not allow_diarization_fallback:
