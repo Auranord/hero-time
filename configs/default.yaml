@@ -22,3 +22,6 @@ llm:
   model: qwen2.5:7b-instruct-q4_K_M
   endpoint: http://localhost:11434
   timeout_seconds: 45
+
+logging:
+  level: INFO
