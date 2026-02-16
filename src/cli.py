@@ -4,7 +4,8 @@ import json
 import logging
 import os
 from pathlib import Path
-from typing import Any
+from time import perf_counter
+from typing import Any, Callable, TypeVar
 
 import typer
 
@@ -31,6 +32,22 @@ app.add_typer(features_app, name="features")
 app.add_typer(propose_app, name="propose")
 
 logger = logging.getLogger(__name__)
+
+T = TypeVar("T")
+
+
+def _run_with_progress(step_index: int, total_steps: int, label: str, work: Callable[[], T]) -> T:
+    typer.echo(f"[{step_index}/{total_steps}] {label}...", err=True)
+    started_at = perf_counter()
+    try:
+        result = work()
+    except Exception:
+        elapsed = perf_counter() - started_at
+        typer.echo(f"[{step_index}/{total_steps}] {label} failed after {elapsed:.1f}s", err=True)
+        raise
+    elapsed = perf_counter() - started_at
+    typer.echo(f"[{step_index}/{total_steps}] {label} done in {elapsed:.1f}s", err=True)
+    return result
 
 
 def _bootstrap(config_path: Path) -> Settings:
@@ -122,6 +139,8 @@ def asr(
     language: str = typer.Option("de", help="Language code for transcription."),
     model_size: str = typer.Option("small", help="Faster-whisper model size/name."),
     chunk_seconds: int = typer.Option(120, help="Audio chunk size for transcription."),
+    device: str = typer.Option("auto", help="ASR device: auto, cpu, cuda, cuda:0, ..."),
+    compute_type: str = typer.Option("default", help="faster-whisper compute type: default, float16, int8, ..."),
 ) -> None:
     """Run chunked faster-whisper ASR and cache transcript artifacts."""
 
@@ -132,6 +151,8 @@ def asr(
         language=language,
         model_size=model_size,
         chunk_seconds=chunk_seconds,
+        device=device,
+        compute_type=compute_type,
     )
     logger.info("ASR completed for %s", audio_path)
     typer.echo(json.dumps(result, indent=2))
@@ -150,6 +171,7 @@ def diarize(
     transcript_path: Path | None = typer.Option(None, help="Optional ASR transcript.json for alignment."),
     hf_auth_token: str | None = typer.Option(None, help="Hugging Face auth token for pyannote model."),
     pipeline_model: str = typer.Option("pyannote/speaker-diarization-3.1", help="Pyannote pipeline model id."),
+    device: str = typer.Option("auto", help="Diarization device: auto, cpu, cuda, cuda:0, ..."),
 ) -> None:
     """Run speaker diarization and compute overlap statistics."""
 
@@ -162,6 +184,7 @@ def diarize(
         window_overlap_seconds=settings.pipeline.window_overlap_seconds,
         hf_auth_token=hf_auth_token,
         pipeline_model=pipeline_model,
+        device=device,
     )
     logger.info("Diarization completed for %s", audio_path)
     typer.echo(json.dumps(result, indent=2))
@@ -318,6 +341,9 @@ def run_pipeline(
         True,
         help="If diarization fails, continue with a synthetic single-speaker timeline so pipeline still completes.",
     ),
+    asr_device: str = typer.Option("auto", help="ASR device: auto, cpu, cuda, cuda:0, ..."),
+    asr_compute_type: str = typer.Option("default", help="faster-whisper compute type: default, float16, int8, ..."),
+    diarization_device: str = typer.Option("auto", help="Diarization device: auto, cpu, cuda, cuda:0, ..."),
 ) -> None:
     """Run the complete pipeline from a VOD file using project-local default paths."""
 
@@ -328,80 +354,129 @@ def run_pipeline(
 
     resolved_vod_id = vod_id or resolved_vod_path.stem
 
-    probe_result = probe_media(vod_path=str(resolved_vod_path), cache_dir=str(settings.pipeline.cache_dir))
-    extract_result = extract_audio_tracks(vod_path=str(resolved_vod_path), cache_dir=str(settings.pipeline.cache_dir))
-    audio_track_path = _select_default_audio_track(extract_result)
+    total_steps = 8
 
-    asr_result = run_asr(
-        audio_path=audio_track_path,
-        cache_dir=str(settings.pipeline.cache_dir),
-        language=language,
-        model_size=model_size,
-        chunk_seconds=int(settings.pipeline.chunk_minutes * 60),
-    )
-
-    diarization_token = hf_auth_token or os.getenv("HF_TOKEN")
-    diarization_result: dict[str, Any]
     try:
-        diarization_result = run_diarization(
-            audio_path=audio_track_path,
-            cache_dir=str(settings.pipeline.cache_dir),
-            transcript_path=asr_result.get("transcript_path"),
-            window_seconds=settings.pipeline.window_seconds,
-            window_overlap_seconds=settings.pipeline.window_overlap_seconds,
-            hf_auth_token=diarization_token,
-            pipeline_model=pipeline_model,
+        probe_result = _run_with_progress(
+            1,
+            total_steps,
+            "Probe media",
+            lambda: probe_media(vod_path=str(resolved_vod_path), cache_dir=str(settings.pipeline.cache_dir)),
         )
-    except Exception as exc:
-        if not allow_diarization_fallback:
-            raise
-        logger.warning("Diarization failed; continuing with fallback timeline: %s", exc)
-        diarization_result = _fallback_diarization_payload(
-            asr_result=asr_result,
-            window_seconds=settings.pipeline.window_seconds,
-            window_overlap_seconds=settings.pipeline.window_overlap_seconds,
-            cache_dir=settings.pipeline.cache_dir,
-            audio_track_path=audio_track_path,
+        extract_result = _run_with_progress(
+            2,
+            total_steps,
+            "Extract audio tracks",
+            lambda: extract_audio_tracks(vod_path=str(resolved_vod_path), cache_dir=str(settings.pipeline.cache_dir)),
+        )
+        audio_track_path = _select_default_audio_track(extract_result)
+
+        asr_result = _run_with_progress(
+            3,
+            total_steps,
+            "Run ASR",
+            lambda: run_asr(
+                audio_path=audio_track_path,
+                cache_dir=str(settings.pipeline.cache_dir),
+                language=language,
+                model_size=model_size,
+                chunk_seconds=int(settings.pipeline.chunk_minutes * 60),
+                device=asr_device,
+                compute_type=asr_compute_type,
+            ),
         )
 
-    audio_events_result = detect_audio_events(
-        audio_path=audio_track_path,
-        cache_dir=str(settings.pipeline.cache_dir),
-        window_seconds=settings.pipeline.window_seconds,
-        window_overlap_seconds=settings.pipeline.window_overlap_seconds,
-    )
+        diarization_token = hf_auth_token or os.getenv("HF_TOKEN")
 
-    video_motion_result = analyze_video_motion(
-        vod_path=str(resolved_vod_path),
-        cache_dir=str(settings.pipeline.cache_dir),
-        analysis_fps=analysis_fps,
-        window_seconds=settings.pipeline.window_seconds,
-        window_overlap_seconds=settings.pipeline.window_overlap_seconds,
-    )
+        def _run_diarization_stage() -> dict[str, Any]:
+            try:
+                return run_diarization(
+                    audio_path=audio_track_path,
+                    cache_dir=str(settings.pipeline.cache_dir),
+                    transcript_path=asr_result.get("transcript_path"),
+                    window_seconds=settings.pipeline.window_seconds,
+                    window_overlap_seconds=settings.pipeline.window_overlap_seconds,
+                    hf_auth_token=diarization_token,
+                    pipeline_model=pipeline_model,
+                    device=diarization_device,
+                )
+            except Exception as exc:
+                if not allow_diarization_fallback:
+                    raise
+                logger.warning("Diarization failed; continuing with fallback timeline: %s", exc)
+                typer.echo("[4/8] Diarization fallback activated.", err=True)
+                return _fallback_diarization_payload(
+                    asr_result=asr_result,
+                    window_seconds=settings.pipeline.window_seconds,
+                    window_overlap_seconds=settings.pipeline.window_overlap_seconds,
+                    cache_dir=settings.pipeline.cache_dir,
+                    audio_track_path=audio_track_path,
+                )
 
-    clips = build_candidates_from_artifacts(
-        vod_id=resolved_vod_id,
-        asr_payload=asr_result,
-        diarization_payload=diarization_result,
-        video_motion_payload=video_motion_result,
-        audio_events_payload=audio_events_result,
-        weights=settings.weights.model_dump(mode="python"),
-        strategy=settings.scoring.strategy,
-        hybrid_alpha=settings.scoring.hybrid_alpha,
-        top_k=top_k,
-        rerank_top_n=rerank_top_n,
-        llm_endpoint=settings.llm.endpoint,
-        llm_model=settings.llm.model,
-        llm_timeout_seconds=settings.llm.timeout_seconds,
-    )
+        diarization_result = _run_with_progress(4, total_steps, "Run speaker diarization", _run_diarization_stage)
 
-    exported = export_final_outputs(
-        clips=clips,
-        output_dir=settings.pipeline.output_dir,
-        basename=f"{resolved_vod_id}_candidates",
-        vod_path=str(resolved_vod_path),
-        include_ffmpeg_commands=True,
-    )
+        audio_events_result = _run_with_progress(
+            5,
+            total_steps,
+            "Detect audio events",
+            lambda: detect_audio_events(
+                audio_path=audio_track_path,
+                cache_dir=str(settings.pipeline.cache_dir),
+                window_seconds=settings.pipeline.window_seconds,
+                window_overlap_seconds=settings.pipeline.window_overlap_seconds,
+            ),
+        )
+
+        video_motion_result = _run_with_progress(
+            6,
+            total_steps,
+            "Analyze video motion",
+            lambda: analyze_video_motion(
+                vod_path=str(resolved_vod_path),
+                cache_dir=str(settings.pipeline.cache_dir),
+                analysis_fps=analysis_fps,
+                window_seconds=settings.pipeline.window_seconds,
+                window_overlap_seconds=settings.pipeline.window_overlap_seconds,
+            ),
+        )
+
+        clips = _run_with_progress(
+            7,
+            total_steps,
+            "Build highlight candidates",
+            lambda: build_candidates_from_artifacts(
+                vod_id=resolved_vod_id,
+                asr_payload=asr_result,
+                diarization_payload=diarization_result,
+                video_motion_payload=video_motion_result,
+                audio_events_payload=audio_events_result,
+                weights=settings.weights.model_dump(mode="python"),
+                strategy=settings.scoring.strategy,
+                hybrid_alpha=settings.scoring.hybrid_alpha,
+                top_k=top_k,
+                rerank_top_n=rerank_top_n,
+                llm_endpoint=settings.llm.endpoint,
+                llm_model=settings.llm.model,
+                llm_timeout_seconds=settings.llm.timeout_seconds,
+            ),
+        )
+
+        exported = _run_with_progress(
+            8,
+            total_steps,
+            "Export outputs",
+            lambda: export_final_outputs(
+                clips=clips,
+                output_dir=settings.pipeline.output_dir,
+                basename=f"{resolved_vod_id}_candidates",
+                vod_path=str(resolved_vod_path),
+                include_ffmpeg_commands=True,
+            ),
+        )
+    except (RuntimeError, ValueError) as exc:
+        logger.error("Pipeline failed: %s", exc)
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
 
     typer.echo(
         json.dumps(

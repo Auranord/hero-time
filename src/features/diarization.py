@@ -13,6 +13,7 @@ def run_diarization(
     window_overlap_seconds: int = 15,
     hf_auth_token: str | None = None,
     pipeline_model: str = "pyannote/speaker-diarization-3.1",
+    device: str = "auto",
 ) -> dict[str, Any]:
     """Run pyannote diarization, align turns to transcript timeline, and cache artifacts."""
 
@@ -22,7 +23,10 @@ def run_diarization(
 
     from pyannote.audio import Pipeline
 
+    resolved_device = _resolve_torch_device(device)
+
     pipeline = Pipeline.from_pretrained(pipeline_model, use_auth_token=hf_auth_token)
+    pipeline.to(resolved_device)
     diarization = pipeline(str(source_path))
 
     speaker_turns = [
@@ -69,6 +73,7 @@ def run_diarization(
         "audio_path": str(source_path),
         "cache_dir": str(diarization_dir),
         "pipeline_model": pipeline_model,
+        "device": str(resolved_device),
         "speaker_count": len(unique_speakers),
         "speakers": unique_speakers,
         "duration_seconds": duration_seconds,
@@ -93,6 +98,16 @@ def run_diarization(
         **payload,
         "diarization_path": str(artifact_path),
     }
+
+
+def _resolve_torch_device(device: str) -> Any:
+    import torch
+
+    normalized = device.strip().lower()
+    if normalized == "auto":
+        normalized = "cuda" if torch.cuda.is_available() else "cpu"
+
+    return torch.device(normalized)
 
 
 def _load_transcript_segments(transcript_path: str | None) -> list[dict[str, Any]]:
