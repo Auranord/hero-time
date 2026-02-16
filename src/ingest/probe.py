@@ -63,16 +63,36 @@ def _run_ffprobe(vod_path: Path) -> dict[str, Any]:
             "ffprobe executable was not found. Install FFmpeg so ffprobe is available on PATH."
         ) from exc
     except subprocess.CalledProcessError as exc:
-        stderr = (exc.stderr or "").strip()
-        details = f" ffprobe stderr: {stderr}" if stderr else ""
-        raise RuntimeError(
-            f"ffprobe failed to read media file: {vod_path}.{details}"
-        ) from exc
+        raise RuntimeError(_format_ffprobe_invocation_error(vod_path=vod_path, error=exc)) from exc
 
     try:
         return json.loads(completed.stdout)
     except json.JSONDecodeError as exc:
         raise RuntimeError("ffprobe returned invalid JSON output.") from exc
+
+
+def _format_ffprobe_invocation_error(vod_path: Path, error: subprocess.CalledProcessError) -> str:
+    stderr = (error.stderr or "").strip()
+    stderr_lower = stderr.lower()
+
+    if "error while loading shared libraries" in stderr_lower:
+        return (
+            "ffprobe is installed but failed to start because required shared libraries are missing. "
+            "Repair/reinstall your FFmpeg package so ffprobe can load all runtime dependencies "
+            f"(media file: {vod_path}). ffprobe stderr: {stderr}"
+        )
+
+    if error.returncode == 127:
+        return (
+            "ffprobe could not be executed (exit code 127). Verify FFmpeg/ffprobe is correctly installed "
+            f"and available to this shell (media file: {vod_path})."
+            + (f" ffprobe stderr: {stderr}" if stderr else "")
+        )
+
+    return (
+        f"ffprobe failed while probing media file: {vod_path}."
+        + (f" ffprobe stderr: {stderr}" if stderr else "")
+    )
 
 
 def _normalize_probe_payload(vod_path: Path, payload: dict[str, Any]) -> dict[str, Any]:
