@@ -328,80 +328,85 @@ def run_pipeline(
 
     resolved_vod_id = vod_id or resolved_vod_path.stem
 
-    probe_result = probe_media(vod_path=str(resolved_vod_path), cache_dir=str(settings.pipeline.cache_dir))
-    extract_result = extract_audio_tracks(vod_path=str(resolved_vod_path), cache_dir=str(settings.pipeline.cache_dir))
-    audio_track_path = _select_default_audio_track(extract_result)
-
-    asr_result = run_asr(
-        audio_path=audio_track_path,
-        cache_dir=str(settings.pipeline.cache_dir),
-        language=language,
-        model_size=model_size,
-        chunk_seconds=int(settings.pipeline.chunk_minutes * 60),
-    )
-
-    diarization_token = hf_auth_token or os.getenv("HF_TOKEN")
-    diarization_result: dict[str, Any]
     try:
-        diarization_result = run_diarization(
+        probe_result = probe_media(vod_path=str(resolved_vod_path), cache_dir=str(settings.pipeline.cache_dir))
+        extract_result = extract_audio_tracks(vod_path=str(resolved_vod_path), cache_dir=str(settings.pipeline.cache_dir))
+        audio_track_path = _select_default_audio_track(extract_result)
+
+        asr_result = run_asr(
             audio_path=audio_track_path,
             cache_dir=str(settings.pipeline.cache_dir),
-            transcript_path=asr_result.get("transcript_path"),
-            window_seconds=settings.pipeline.window_seconds,
-            window_overlap_seconds=settings.pipeline.window_overlap_seconds,
-            hf_auth_token=diarization_token,
-            pipeline_model=pipeline_model,
-        )
-    except Exception as exc:
-        if not allow_diarization_fallback:
-            raise
-        logger.warning("Diarization failed; continuing with fallback timeline: %s", exc)
-        diarization_result = _fallback_diarization_payload(
-            asr_result=asr_result,
-            window_seconds=settings.pipeline.window_seconds,
-            window_overlap_seconds=settings.pipeline.window_overlap_seconds,
-            cache_dir=settings.pipeline.cache_dir,
-            audio_track_path=audio_track_path,
+            language=language,
+            model_size=model_size,
+            chunk_seconds=int(settings.pipeline.chunk_minutes * 60),
         )
 
-    audio_events_result = detect_audio_events(
-        audio_path=audio_track_path,
-        cache_dir=str(settings.pipeline.cache_dir),
-        window_seconds=settings.pipeline.window_seconds,
-        window_overlap_seconds=settings.pipeline.window_overlap_seconds,
-    )
+        diarization_token = hf_auth_token or os.getenv("HF_TOKEN")
+        diarization_result: dict[str, Any]
+        try:
+            diarization_result = run_diarization(
+                audio_path=audio_track_path,
+                cache_dir=str(settings.pipeline.cache_dir),
+                transcript_path=asr_result.get("transcript_path"),
+                window_seconds=settings.pipeline.window_seconds,
+                window_overlap_seconds=settings.pipeline.window_overlap_seconds,
+                hf_auth_token=diarization_token,
+                pipeline_model=pipeline_model,
+            )
+        except Exception as exc:
+            if not allow_diarization_fallback:
+                raise
+            logger.warning("Diarization failed; continuing with fallback timeline: %s", exc)
+            diarization_result = _fallback_diarization_payload(
+                asr_result=asr_result,
+                window_seconds=settings.pipeline.window_seconds,
+                window_overlap_seconds=settings.pipeline.window_overlap_seconds,
+                cache_dir=settings.pipeline.cache_dir,
+                audio_track_path=audio_track_path,
+            )
 
-    video_motion_result = analyze_video_motion(
-        vod_path=str(resolved_vod_path),
-        cache_dir=str(settings.pipeline.cache_dir),
-        analysis_fps=analysis_fps,
-        window_seconds=settings.pipeline.window_seconds,
-        window_overlap_seconds=settings.pipeline.window_overlap_seconds,
-    )
+        audio_events_result = detect_audio_events(
+            audio_path=audio_track_path,
+            cache_dir=str(settings.pipeline.cache_dir),
+            window_seconds=settings.pipeline.window_seconds,
+            window_overlap_seconds=settings.pipeline.window_overlap_seconds,
+        )
 
-    clips = build_candidates_from_artifacts(
-        vod_id=resolved_vod_id,
-        asr_payload=asr_result,
-        diarization_payload=diarization_result,
-        video_motion_payload=video_motion_result,
-        audio_events_payload=audio_events_result,
-        weights=settings.weights.model_dump(mode="python"),
-        strategy=settings.scoring.strategy,
-        hybrid_alpha=settings.scoring.hybrid_alpha,
-        top_k=top_k,
-        rerank_top_n=rerank_top_n,
-        llm_endpoint=settings.llm.endpoint,
-        llm_model=settings.llm.model,
-        llm_timeout_seconds=settings.llm.timeout_seconds,
-    )
+        video_motion_result = analyze_video_motion(
+            vod_path=str(resolved_vod_path),
+            cache_dir=str(settings.pipeline.cache_dir),
+            analysis_fps=analysis_fps,
+            window_seconds=settings.pipeline.window_seconds,
+            window_overlap_seconds=settings.pipeline.window_overlap_seconds,
+        )
 
-    exported = export_final_outputs(
-        clips=clips,
-        output_dir=settings.pipeline.output_dir,
-        basename=f"{resolved_vod_id}_candidates",
-        vod_path=str(resolved_vod_path),
-        include_ffmpeg_commands=True,
-    )
+        clips = build_candidates_from_artifacts(
+            vod_id=resolved_vod_id,
+            asr_payload=asr_result,
+            diarization_payload=diarization_result,
+            video_motion_payload=video_motion_result,
+            audio_events_payload=audio_events_result,
+            weights=settings.weights.model_dump(mode="python"),
+            strategy=settings.scoring.strategy,
+            hybrid_alpha=settings.scoring.hybrid_alpha,
+            top_k=top_k,
+            rerank_top_n=rerank_top_n,
+            llm_endpoint=settings.llm.endpoint,
+            llm_model=settings.llm.model,
+            llm_timeout_seconds=settings.llm.timeout_seconds,
+        )
+
+        exported = export_final_outputs(
+            clips=clips,
+            output_dir=settings.pipeline.output_dir,
+            basename=f"{resolved_vod_id}_candidates",
+            vod_path=str(resolved_vod_path),
+            include_ffmpeg_commands=True,
+        )
+    except (RuntimeError, ValueError) as exc:
+        logger.error("Pipeline failed: %s", exc)
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
 
     typer.echo(
         json.dumps(
