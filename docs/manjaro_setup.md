@@ -64,6 +64,16 @@ python -m src.cli features diarize /path/to/audio.wav --hf-auth-token "$HF_TOKEN
 
 ## 5) Quick smoke run
 
+Single-command pipeline (recommended):
+
+```bash
+python -m src.cli run /path/to/vod.mkv
+```
+
+This uses project defaults from `configs/default.yaml` for cache/output paths.
+
+Expanded staged commands (debug-friendly):
+
 ```bash
 python -m src.cli config show
 python -m src.cli ingest probe /path/to/vod.mkv

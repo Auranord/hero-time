@@ -43,6 +43,14 @@ The system is organized as a sequential offline pipeline:
 
 ## Run (scaffold)
 
+### One-command full pipeline
+
+```bash
+python -m src.cli run /path/to/vod.mkv
+```
+
+This runs probe, audio extraction, ASR, diarization (or fallback), audio-event extraction, video-motion analysis, scoring, and final export in project-local cache/output directories configured by `configs/default.yaml`.
+
 ```bash
 python -m src.cli config show
 python -m src.cli ingest probe /path/to/vod.mkv

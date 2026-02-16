@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from pathlib import Path
+from typing import Any
 
 import typer
 
@@ -292,6 +294,212 @@ def build_candidates(
     )
 
     typer.echo(json.dumps({"clip_count": len(clips), **{k: str(v) for k, v in exported.items()}}, indent=2))
+
+
+@app.command("run")
+def run_pipeline(
+    vod_path: str,
+    vod_id: str | None = typer.Option(None, help="Optional VOD id. Defaults to source filename stem."),
+    config_path: Path = typer.Option(
+        Path("configs/default.yaml"),
+        "--config",
+        "-c",
+        envvar="VOD_HIGHLIGHTS_CONFIG",
+        help="Path to YAML configuration file.",
+    ),
+    language: str = typer.Option("de", help="Language code for ASR transcription."),
+    model_size: str = typer.Option("small", help="Faster-whisper model size/name."),
+    analysis_fps: float = typer.Option(2.0, help="Sampling FPS for video motion analysis."),
+    top_k: int = typer.Option(20, help="Maximum number of candidate windows before merge/cooldown."),
+    rerank_top_n: int = typer.Option(0, help="Optional top-N candidates to rerank with local LLM."),
+    hf_auth_token: str | None = typer.Option(None, help="Optional Hugging Face auth token for diarization."),
+    pipeline_model: str = typer.Option("pyannote/speaker-diarization-3.1", help="Pyannote pipeline model id."),
+    allow_diarization_fallback: bool = typer.Option(
+        True,
+        help="If diarization fails, continue with a synthetic single-speaker timeline so pipeline still completes.",
+    ),
+) -> None:
+    """Run the complete pipeline from a VOD file using project-local default paths."""
+
+    settings = _bootstrap(config_path)
+    resolved_vod_path = Path(vod_path).expanduser().resolve()
+    if not resolved_vod_path.exists():
+        raise FileNotFoundError(f"VOD file not found: {resolved_vod_path}")
+
+    resolved_vod_id = vod_id or resolved_vod_path.stem
+
+    probe_result = probe_media(vod_path=str(resolved_vod_path), cache_dir=str(settings.pipeline.cache_dir))
+    extract_result = extract_audio_tracks(vod_path=str(resolved_vod_path), cache_dir=str(settings.pipeline.cache_dir))
+    audio_track_path = _select_default_audio_track(extract_result)
+
+    asr_result = run_asr(
+        audio_path=audio_track_path,
+        cache_dir=str(settings.pipeline.cache_dir),
+        language=language,
+        model_size=model_size,
+        chunk_seconds=int(settings.pipeline.chunk_minutes * 60),
+    )
+
+    diarization_token = hf_auth_token or os.getenv("HF_TOKEN")
+    diarization_result: dict[str, Any]
+    try:
+        diarization_result = run_diarization(
+            audio_path=audio_track_path,
+            cache_dir=str(settings.pipeline.cache_dir),
+            transcript_path=asr_result.get("transcript_path"),
+            window_seconds=settings.pipeline.window_seconds,
+            window_overlap_seconds=settings.pipeline.window_overlap_seconds,
+            hf_auth_token=diarization_token,
+            pipeline_model=pipeline_model,
+        )
+    except Exception as exc:
+        if not allow_diarization_fallback:
+            raise
+        logger.warning("Diarization failed; continuing with fallback timeline: %s", exc)
+        diarization_result = _fallback_diarization_payload(
+            asr_result=asr_result,
+            window_seconds=settings.pipeline.window_seconds,
+            window_overlap_seconds=settings.pipeline.window_overlap_seconds,
+            cache_dir=settings.pipeline.cache_dir,
+            audio_track_path=audio_track_path,
+        )
+
+    audio_events_result = detect_audio_events(
+        audio_path=audio_track_path,
+        cache_dir=str(settings.pipeline.cache_dir),
+        window_seconds=settings.pipeline.window_seconds,
+        window_overlap_seconds=settings.pipeline.window_overlap_seconds,
+    )
+
+    video_motion_result = analyze_video_motion(
+        vod_path=str(resolved_vod_path),
+        cache_dir=str(settings.pipeline.cache_dir),
+        analysis_fps=analysis_fps,
+        window_seconds=settings.pipeline.window_seconds,
+        window_overlap_seconds=settings.pipeline.window_overlap_seconds,
+    )
+
+    clips = build_candidates_from_artifacts(
+        vod_id=resolved_vod_id,
+        asr_payload=asr_result,
+        diarization_payload=diarization_result,
+        video_motion_payload=video_motion_result,
+        audio_events_payload=audio_events_result,
+        weights=settings.weights.model_dump(mode="python"),
+        strategy=settings.scoring.strategy,
+        hybrid_alpha=settings.scoring.hybrid_alpha,
+        top_k=top_k,
+        rerank_top_n=rerank_top_n,
+        llm_endpoint=settings.llm.endpoint,
+        llm_model=settings.llm.model,
+        llm_timeout_seconds=settings.llm.timeout_seconds,
+    )
+
+    exported = export_final_outputs(
+        clips=clips,
+        output_dir=settings.pipeline.output_dir,
+        basename=f"{resolved_vod_id}_candidates",
+        vod_path=str(resolved_vod_path),
+        include_ffmpeg_commands=True,
+    )
+
+    typer.echo(
+        json.dumps(
+            {
+                "status": "ok",
+                "vod_id": resolved_vod_id,
+                "vod_path": str(resolved_vod_path),
+                "selected_audio_track": audio_track_path,
+                "clip_count": len(clips),
+                "probe_metadata_path": probe_result.get("metadata_path"),
+                "artifacts": {
+                    "asr": asr_result.get("transcript_path"),
+                    "diarization": diarization_result.get("diarization_path"),
+                    "audio_events": audio_events_result.get("audio_events_path"),
+                    "video_motion": video_motion_result.get("video_motion_path"),
+                },
+                "outputs": {k: str(v) for k, v in exported.items()},
+            },
+            indent=2,
+        )
+    )
+
+
+def _select_default_audio_track(extract_result: dict[str, Any]) -> str:
+    tracks = extract_result.get("tracks", [])
+    if not tracks:
+        raise ValueError("No audio tracks found in extracted media manifest.")
+    return str(tracks[0]["path"])
+
+
+def _fallback_diarization_payload(
+    *,
+    asr_result: dict[str, Any],
+    window_seconds: int,
+    window_overlap_seconds: int,
+    cache_dir: Path,
+    audio_track_path: str,
+) -> dict[str, Any]:
+    duration_seconds = float(asr_result.get("duration_seconds", 0.0))
+    step_seconds = max(window_seconds - window_overlap_seconds, 1)
+    windows: list[dict[str, Any]] = []
+    index = 0
+    start = 0.0
+    while start < duration_seconds:
+        end = min(start + window_seconds, duration_seconds)
+        windows.append(
+            {
+                "window_index": index,
+                "start_seconds": round(start, 3),
+                "end_seconds": round(end, 3),
+                "duration_seconds": round(end - start, 3),
+                "overlap_seconds": 0.0,
+                "overlap_ratio": 0.0,
+                "active_speakers": 1,
+            }
+        )
+        start += float(step_seconds)
+        index += 1
+
+    fallback_dir = Path(cache_dir).expanduser().resolve() / "features" / "diarization" / Path(audio_track_path).stem
+    fallback_dir.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "status": "fallback",
+        "audio_path": str(Path(audio_track_path).expanduser().resolve()),
+        "cache_dir": str(fallback_dir),
+        "pipeline_model": "fallback-single-speaker",
+        "speaker_count": 1,
+        "speakers": ["speaker_00"],
+        "duration_seconds": duration_seconds,
+        "speaker_turn_count": 1 if duration_seconds > 0 else 0,
+        "speaker_turns": [
+            {
+                "id": "turn_000000",
+                "speaker": "speaker_00",
+                "start_seconds": 0.0,
+                "end_seconds": round(duration_seconds, 3),
+                "duration_seconds": round(duration_seconds, 3),
+            }
+        ]
+        if duration_seconds > 0
+        else [],
+        "aligned_transcript_segment_count": 0,
+        "aligned_transcript_segments": [],
+        "overlap": {
+            "global_overlap_seconds": 0.0,
+            "global_overlap_ratio": 0.0,
+        },
+        "window_seconds": window_seconds,
+        "window_overlap_seconds": window_overlap_seconds,
+        "window_overlap_stats": windows,
+        "speaking_time_seconds": {"speaker_00": round(duration_seconds, 3)},
+    }
+    artifact_path = fallback_dir / "diarization_fallback.json"
+    artifact_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    return {
+        **payload,
+        "diarization_path": str(artifact_path),
+    }
 
 
 if __name__ == "__main__":
