@@ -50,6 +50,7 @@ python -m src.cli ingest extract-audio /path/to/vod.mkv
 python -m src.cli features asr /path/to/audio.wav
 python -m src.cli features diarize /path/to/audio.wav --transcript-path /path/to/transcript.json
 python -m src.cli features video-motion /path/to/vod.mkv
+python -m src.cli propose review /path/to/candidates.json --vod-path /path/to/vod.mkv
 ```
 
 ## Configuration
