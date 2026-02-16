@@ -13,15 +13,18 @@ from src.features.video_motion import analyze_video_motion
 from src.ingest.extract_audio import extract_audio_tracks
 from src.ingest.probe import probe_media
 from src.logging_config import configure_logging
+from src.propose.exporter import export_final_outputs, load_candidate_clips
 
 app = typer.Typer(help="Twitch VOD highlight pipeline (MVP scaffold).")
 config_app = typer.Typer(help="Configuration commands.")
 ingest_app = typer.Typer(help="Ingest commands.")
 features_app = typer.Typer(help="Feature extraction commands.")
+propose_app = typer.Typer(help="Proposal output and review commands.")
 
 app.add_typer(config_app, name="config")
 app.add_typer(ingest_app, name="ingest")
 app.add_typer(features_app, name="features")
+app.add_typer(propose_app, name="propose")
 
 logger = logging.getLogger(__name__)
 
@@ -184,6 +187,32 @@ def video_motion(
     )
     logger.info("Video motion analysis completed for %s", vod_path)
     typer.echo(json.dumps(result, indent=2))
+
+
+@propose_app.command("review")
+def review_candidates(
+    candidates_path: Path = typer.Argument(..., help="Path to candidate JSON contract."),
+    output_dir: Path = typer.Option(Path("data/outputs"), "--output-dir", "-o", help="Directory for JSON/CSV/review outputs."),
+    basename: str = typer.Option("candidates_final", help="Base filename for exported artifacts."),
+    vod_path: str | None = typer.Option(None, help="Optional source VOD path for ffmpeg command generation."),
+    include_ffmpeg_commands: bool = typer.Option(True, help="Include ffmpeg clip commands in review manifest when vod_path is provided."),
+) -> None:
+    """Export final JSON/CSV contract artifacts and review manifest."""
+
+    clips = load_candidate_clips(candidates_path)
+    exported = export_final_outputs(
+        clips=clips,
+        output_dir=output_dir,
+        basename=basename,
+        vod_path=vod_path,
+        include_ffmpeg_commands=include_ffmpeg_commands,
+    )
+    typer.echo(
+        json.dumps(
+            {key: str(path) for key, path in exported.items()},
+            indent=2,
+        )
+    )
 
 
 if __name__ == "__main__":
