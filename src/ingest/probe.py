@@ -51,13 +51,28 @@ def _run_ffprobe(vod_path: Path) -> dict[str, Any]:
         str(vod_path),
     ]
 
-    completed = subprocess.run(
-        command,
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    return json.loads(completed.stdout)
+    try:
+        completed = subprocess.run(
+            command,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except FileNotFoundError as exc:
+        raise RuntimeError(
+            "ffprobe executable was not found. Install FFmpeg so ffprobe is available on PATH."
+        ) from exc
+    except subprocess.CalledProcessError as exc:
+        stderr = (exc.stderr or "").strip()
+        details = f" ffprobe stderr: {stderr}" if stderr else ""
+        raise RuntimeError(
+            f"ffprobe failed to read media file: {vod_path}.{details}"
+        ) from exc
+
+    try:
+        return json.loads(completed.stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("ffprobe returned invalid JSON output.") from exc
 
 
 def _normalize_probe_payload(vod_path: Path, payload: dict[str, Any]) -> dict[str, Any]:
