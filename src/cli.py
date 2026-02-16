@@ -7,6 +7,7 @@ from pathlib import Path
 import typer
 
 from src.config import Settings, load_settings
+from src.features.audio_events import detect_audio_events
 from src.features.asr import run_asr
 from src.features.diarization import run_diarization
 from src.features.video_motion import analyze_video_motion
@@ -14,6 +15,7 @@ from src.ingest.extract_audio import extract_audio_tracks
 from src.ingest.probe import probe_media
 from src.logging_config import configure_logging
 from src.propose.exporter import export_final_outputs, load_candidate_clips
+from src.pipeline_candidate_builder import build_candidates_from_artifacts
 
 app = typer.Typer(help="Twitch VOD highlight pipeline (MVP scaffold).")
 config_app = typer.Typer(help="Configuration commands.")
@@ -189,6 +191,30 @@ def video_motion(
     typer.echo(json.dumps(result, indent=2))
 
 
+@features_app.command("audio-events")
+def audio_events(
+    audio_path: str,
+    config_path: Path = typer.Option(
+        Path("configs/default.yaml"),
+        "--config",
+        "-c",
+        envvar="VOD_HIGHLIGHTS_CONFIG",
+        help="Path to YAML configuration file.",
+    ),
+) -> None:
+    """Run lightweight audio-event extraction (loudness/reaction proxies)."""
+
+    settings = _bootstrap(config_path)
+    result = detect_audio_events(
+        audio_path=audio_path,
+        cache_dir=str(settings.pipeline.cache_dir),
+        window_seconds=settings.pipeline.window_seconds,
+        window_overlap_seconds=settings.pipeline.window_overlap_seconds,
+    )
+    logger.info("Audio event extraction completed for %s", audio_path)
+    typer.echo(json.dumps(result, indent=2))
+
+
 @propose_app.command("review")
 def review_candidates(
     candidates_path: Path = typer.Argument(..., help="Path to candidate JSON contract."),
@@ -213,6 +239,59 @@ def review_candidates(
             indent=2,
         )
     )
+
+
+@propose_app.command("build")
+def build_candidates(
+    vod_id: str,
+    asr_path: Path = typer.Option(..., help="Path to ASR transcript.json artifact."),
+    diarization_path: Path = typer.Option(..., help="Path to diarization.json artifact."),
+    video_motion_path: Path = typer.Option(..., help="Path to video_motion.json artifact."),
+    audio_events_path: Path = typer.Option(..., help="Path to audio_events.json artifact."),
+    output_dir: Path = typer.Option(Path("data/outputs"), "--output-dir", "-o", help="Directory for JSON/CSV/review outputs."),
+    basename: str = typer.Option("candidates_final", help="Base filename for exported artifacts."),
+    top_k: int = typer.Option(20, help="Maximum number of candidate windows before merge/cooldown."),
+    rerank_top_n: int = typer.Option(0, help="Optional top-N candidates to rerank with local LLM."),
+    config_path: Path = typer.Option(
+        Path("configs/default.yaml"),
+        "--config",
+        "-c",
+        envvar="VOD_HIGHLIGHTS_CONFIG",
+        help="Path to YAML configuration file.",
+    ),
+) -> None:
+    """Build final candidate clips from cached feature artifacts."""
+
+    settings = _bootstrap(config_path)
+
+    asr_payload = json.loads(asr_path.read_text(encoding="utf-8"))
+    diarization_payload = json.loads(diarization_path.read_text(encoding="utf-8"))
+    video_motion_payload = json.loads(video_motion_path.read_text(encoding="utf-8"))
+    audio_events_payload = json.loads(audio_events_path.read_text(encoding="utf-8"))
+
+    clips = build_candidates_from_artifacts(
+        vod_id=vod_id,
+        asr_payload=asr_payload,
+        diarization_payload=diarization_payload,
+        video_motion_payload=video_motion_payload,
+        audio_events_payload=audio_events_payload,
+        weights=settings.weights.model_dump(mode="python"),
+        strategy=settings.scoring.strategy,
+        hybrid_alpha=settings.scoring.hybrid_alpha,
+        top_k=top_k,
+        rerank_top_n=rerank_top_n,
+        llm_endpoint=settings.llm.endpoint,
+        llm_model=settings.llm.model,
+        llm_timeout_seconds=settings.llm.timeout_seconds,
+    )
+
+    exported = export_final_outputs(
+        clips=clips,
+        output_dir=output_dir,
+        basename=basename,
+    )
+
+    typer.echo(json.dumps({"clip_count": len(clips), **{k: str(v) for k, v in exported.items()}}, indent=2))
 
 
 if __name__ == "__main__":

@@ -49,9 +49,33 @@ python -m src.cli ingest probe /path/to/vod.mkv
 python -m src.cli ingest extract-audio /path/to/vod.mkv
 python -m src.cli features asr /path/to/audio.wav
 python -m src.cli features diarize /path/to/audio.wav --transcript-path /path/to/transcript.json
+python -m src.cli features audio-events /path/to/audio.wav
 python -m src.cli features video-motion /path/to/vod.mkv
+python -m src.cli propose build vod_001 \
+  --asr-path /path/to/transcript.json \
+  --diarization-path /path/to/diarization.json \
+  --video-motion-path /path/to/video_motion.json \
+  --audio-events-path /path/to/audio_events.json
 python -m src.cli propose review /path/to/candidates.json --vod-path /path/to/vod.mkv
 ```
+
+## Prerequisites
+
+- Python 3.11+
+- `ffmpeg` and `ffprobe` available on `PATH`
+- Python dependencies from `pyproject.toml`
+- (Optional) Local Ollama runtime if you want LLM reranking
+- (Optional) Hugging Face auth token for `pyannote.audio` speaker diarization model access
+
+Install project dependencies:
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -e .
+```
+
+For local Ollama reranking, ensure Ollama is running and a compatible model is pulled (default: `qwen2.5:7b-instruct-q4_K_M`).
 
 ## Configuration
 
@@ -68,4 +92,12 @@ ASR artifacts are persisted under `data/cache/features/asr/<audio_stem>/` includ
 
 Diarization artifacts are persisted under `data/cache/features/diarization/<audio_stem>/diarization.json` with speaker turns, transcript alignment, speaking-time totals, and overlap metrics per analysis window.
 
+Audio event artifacts are persisted under `data/cache/features/audio_events/<audio_stem>/audio_events.json` with loudness spike events and per-window audio intensity features.
+
 Video motion artifacts are persisted under `data/cache/features/video_motion/<vod_stem>/video_motion.json` with low-FPS motion peaks, scene-change detections, and per-window intensity features aligned to scoring windows.
+
+Generated candidate exports are written to `data/outputs/` as JSON, CSV, and review manifest files.
+
+## Manjaro setup guide
+
+See `docs/manjaro_setup.md` for a distro-specific setup guide.
