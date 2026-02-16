@@ -44,7 +44,12 @@ The system is organized as a sequential offline pipeline:
 ## Run (scaffold)
 
 ```bash
-python -m src.cli plan
+python -m src.cli config show
+python -m src.cli ingest probe /path/to/vod.mkv
+python -m src.cli ingest extract-audio /path/to/vod.mkv
+python -m src.cli features asr /path/to/audio.wav
+python -m src.cli features diarize /path/to/audio.wav --transcript-path /path/to/transcript.json
+python -m src.cli features video-motion /path/to/vod.mkv
 ```
 
 ## Configuration
@@ -52,3 +57,14 @@ python -m src.cli plan
 Default runtime configuration: `configs/default.yaml`.
 
 Prompt template for local reranking: `prompts/rerank_prompt.txt`.
+
+
+Environment overrides use the `VOD_HIGHLIGHTS_` prefix and nested keys via `__` (for example `VOD_HIGHLIGHTS_PIPELINE__CHUNK_MINUTES=5`).
+
+Ingest artifacts are persisted under `data/cache/ingest/<vod_stem>/` (ffprobe raw JSON, normalized metadata, and extracted WAV tracks).
+
+ASR artifacts are persisted under `data/cache/features/asr/<audio_stem>/` including chunk WAV files and `transcript.json` with timestamped segments and confidence fields.
+
+Diarization artifacts are persisted under `data/cache/features/diarization/<audio_stem>/diarization.json` with speaker turns, transcript alignment, speaking-time totals, and overlap metrics per analysis window.
+
+Video motion artifacts are persisted under `data/cache/features/video_motion/<vod_stem>/video_motion.json` with low-FPS motion peaks, scene-change detections, and per-window intensity features aligned to scoring windows.
