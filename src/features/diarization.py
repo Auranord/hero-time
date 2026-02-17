@@ -13,6 +13,7 @@ def run_diarization(
     window_overlap_seconds: int = 15,
     hf_auth_token: str | None = None,
     pipeline_model: str = "pyannote/speaker-diarization-3.1",
+    device: str = "auto",
 ) -> dict[str, Any]:
     """Run pyannote diarization, align turns to transcript timeline, and cache artifacts."""
 
@@ -22,8 +23,18 @@ def run_diarization(
 
     from pyannote.audio import Pipeline
 
-    pipeline = Pipeline.from_pretrained(pipeline_model, use_auth_token=hf_auth_token)
-    diarization = pipeline(str(source_path))
+    resolved_device = _resolve_torch_device(device)
+
+    try:
+        pipeline = _load_pyannote_pipeline(
+            pipeline_class=Pipeline,
+            pipeline_model=pipeline_model,
+            hf_auth_token=hf_auth_token,
+        )
+        pipeline.to(resolved_device)
+        diarization = pipeline(str(source_path))
+    except Exception as exc:
+        raise RuntimeError(_format_diarization_runtime_error(exc, pipeline_model=pipeline_model)) from exc
 
     speaker_turns = [
         {
@@ -69,6 +80,7 @@ def run_diarization(
         "audio_path": str(source_path),
         "cache_dir": str(diarization_dir),
         "pipeline_model": pipeline_model,
+        "device": str(resolved_device),
         "speaker_count": len(unique_speakers),
         "speakers": unique_speakers,
         "duration_seconds": duration_seconds,
@@ -93,6 +105,49 @@ def run_diarization(
         **payload,
         "diarization_path": str(artifact_path),
     }
+
+
+def _format_diarization_runtime_error(error: Exception, *, pipeline_model: str) -> str:
+    message = str(error)
+    lowered = message.lower()
+
+    if "403" in lowered or "gated" in lowered or "cannot access gated repo" in lowered:
+        return (
+            f"Diarization model access denied for '{pipeline_model}'. "
+            "Accept model conditions on Hugging Face and provide a valid token via --hf-auth-token or HF_TOKEN. "
+            f"Original error: {message}"
+        )
+
+    if "401" in lowered or "unauthorized" in lowered or "forbidden" in lowered:
+        return (
+            f"Diarization authentication failed for '{pipeline_model}'. "
+            "Pass a valid Hugging Face token via --hf-auth-token or HF_TOKEN. "
+            f"Original error: {message}"
+        )
+
+    return f"Diarization failed for model '{pipeline_model}': {message}"
+
+
+def _load_pyannote_pipeline(*, pipeline_class: Any, pipeline_model: str, hf_auth_token: str | None) -> Any:
+    if hf_auth_token:
+        try:
+            return pipeline_class.from_pretrained(pipeline_model, use_auth_token=hf_auth_token)
+        except TypeError as exc:
+            if "use_auth_token" not in str(exc):
+                raise
+            return pipeline_class.from_pretrained(pipeline_model, token=hf_auth_token)
+
+    return pipeline_class.from_pretrained(pipeline_model)
+
+
+def _resolve_torch_device(device: str) -> Any:
+    import torch
+
+    normalized = device.strip().lower()
+    if normalized == "auto":
+        normalized = "cuda" if torch.cuda.is_available() else "cpu"
+
+    return torch.device(normalized)
 
 
 def _load_transcript_segments(transcript_path: str | None) -> list[dict[str, Any]]:
