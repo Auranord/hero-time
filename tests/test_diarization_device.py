@@ -3,7 +3,11 @@ from __future__ import annotations
 import sys
 from types import SimpleNamespace
 
-from src.features.diarization import _load_pyannote_pipeline, _resolve_torch_device
+from src.features.diarization import (
+    _format_diarization_runtime_error,
+    _load_pyannote_pipeline,
+    _resolve_torch_device,
+)
 
 
 class _FakeTorchDevice:
@@ -96,3 +100,24 @@ def test_load_pyannote_pipeline_propagates_unrelated_type_errors() -> None:
         assert "other type error" in str(exc)
     else:
         raise AssertionError("Expected TypeError to be raised")
+
+
+
+def test_format_diarization_runtime_error_for_gated_repo() -> None:
+    message = _format_diarization_runtime_error(
+        Exception("403 Client Error: Cannot access gated repo"),
+        pipeline_model="pyannote/speaker-diarization-3.1",
+    )
+
+    assert "access denied" in message.lower()
+    assert "HF_TOKEN" in message
+
+
+def test_format_diarization_runtime_error_generic_case() -> None:
+    message = _format_diarization_runtime_error(
+        Exception("unexpected backend crash"),
+        pipeline_model="pyannote/speaker-diarization-3.1",
+    )
+
+    assert "Diarization failed for model" in message
+    assert "unexpected backend crash" in message

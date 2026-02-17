@@ -25,13 +25,16 @@ def run_diarization(
 
     resolved_device = _resolve_torch_device(device)
 
-    pipeline = _load_pyannote_pipeline(
-        pipeline_class=Pipeline,
-        pipeline_model=pipeline_model,
-        hf_auth_token=hf_auth_token,
-    )
-    pipeline.to(resolved_device)
-    diarization = pipeline(str(source_path))
+    try:
+        pipeline = _load_pyannote_pipeline(
+            pipeline_class=Pipeline,
+            pipeline_model=pipeline_model,
+            hf_auth_token=hf_auth_token,
+        )
+        pipeline.to(resolved_device)
+        diarization = pipeline(str(source_path))
+    except Exception as exc:
+        raise RuntimeError(_format_diarization_runtime_error(exc, pipeline_model=pipeline_model)) from exc
 
     speaker_turns = [
         {
@@ -102,6 +105,27 @@ def run_diarization(
         **payload,
         "diarization_path": str(artifact_path),
     }
+
+
+def _format_diarization_runtime_error(error: Exception, *, pipeline_model: str) -> str:
+    message = str(error)
+    lowered = message.lower()
+
+    if "403" in lowered or "gated" in lowered or "cannot access gated repo" in lowered:
+        return (
+            f"Diarization model access denied for '{pipeline_model}'. "
+            "Accept model conditions on Hugging Face and provide a valid token via --hf-auth-token or HF_TOKEN. "
+            f"Original error: {message}"
+        )
+
+    if "401" in lowered or "unauthorized" in lowered or "forbidden" in lowered:
+        return (
+            f"Diarization authentication failed for '{pipeline_model}'. "
+            "Pass a valid Hugging Face token via --hf-auth-token or HF_TOKEN. "
+            f"Original error: {message}"
+        )
+
+    return f"Diarization failed for model '{pipeline_model}': {message}"
 
 
 def _load_pyannote_pipeline(*, pipeline_class: Any, pipeline_model: str, hf_auth_token: str | None) -> Any:
