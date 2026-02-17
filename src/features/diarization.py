@@ -25,7 +25,11 @@ def run_diarization(
 
     resolved_device = _resolve_torch_device(device)
 
-    pipeline = Pipeline.from_pretrained(pipeline_model, use_auth_token=hf_auth_token)
+    pipeline = _load_pyannote_pipeline(
+        pipeline_class=Pipeline,
+        pipeline_model=pipeline_model,
+        hf_auth_token=hf_auth_token,
+    )
     pipeline.to(resolved_device)
     diarization = pipeline(str(source_path))
 
@@ -98,6 +102,18 @@ def run_diarization(
         **payload,
         "diarization_path": str(artifact_path),
     }
+
+
+def _load_pyannote_pipeline(*, pipeline_class: Any, pipeline_model: str, hf_auth_token: str | None) -> Any:
+    if hf_auth_token:
+        try:
+            return pipeline_class.from_pretrained(pipeline_model, use_auth_token=hf_auth_token)
+        except TypeError as exc:
+            if "use_auth_token" not in str(exc):
+                raise
+            return pipeline_class.from_pretrained(pipeline_model, token=hf_auth_token)
+
+    return pipeline_class.from_pretrained(pipeline_model)
 
 
 def _resolve_torch_device(device: str) -> Any:
