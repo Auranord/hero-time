@@ -6,4 +6,6 @@ Return strict JSON with keys:
 - boundary_adjustment_seconds (integer, negative or positive)
 
 Evaluate candidate context for standalone clip quality, payoff, and emotional clarity.
+You MUST ground your judgment in the transcript_excerpt when it is present in Candidate JSON.
+Mention transcript evidence in the reason (for example a quoted word/phrase) instead of generic feature-only statements.
 Do not invent events that are not present in the provided context.

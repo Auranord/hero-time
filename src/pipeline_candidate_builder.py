@@ -44,6 +44,7 @@ def build_candidates_from_artifacts(
                 "score": heuristic_details.score,
                 "reason_tags": heuristic_details.reason_tags,
                 "feature_values": heuristic_details.feature_values,
+                "transcript_excerpt": str(window.metadata.get("transcript_excerpt", "")),
             }
         )
 
@@ -115,6 +116,7 @@ def _build_feature_windows(
 
     speech_rate_per_window: dict[int, float] = defaultdict(float)
     excitement_per_window: dict[int, float] = defaultdict(float)
+    transcript_lines_per_window: dict[int, list[str]] = defaultdict(list)
 
     for segment in transcript_segments:
         start = float(segment.get("start_seconds", 0.0))
@@ -125,6 +127,8 @@ def _build_feature_windows(
         rate = len(words) / duration
         window_index = int(start // 15)
         speech_rate_per_window[window_index] += rate
+        if text.strip():
+            transcript_lines_per_window[window_index].append(text.strip())
 
         excitement = _transcript_excitement_score(text)
         excitement_per_window[window_index] = max(excitement_per_window[window_index], excitement)
@@ -154,7 +158,10 @@ def _build_feature_windows(
                 start_seconds=start,
                 end_seconds=end,
                 values=features,
-                metadata={"window_index": index},
+                metadata={
+                    "window_index": index,
+                    "transcript_excerpt": " ".join(transcript_lines_per_window.get(index, [])),
+                },
             )
         )
 
