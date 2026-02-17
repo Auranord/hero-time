@@ -50,6 +50,21 @@ def _run_with_progress(step_index: int, total_steps: int, label: str, work: Call
     return result
 
 
+def _load_cached_payload(path: Path, label: str, step_index: int, total_steps: int) -> dict[str, Any] | None:
+    if not path.exists():
+        return None
+
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        logger.warning("Failed to load cached payload at %s (%s); recomputing step.", path, exc)
+        return None
+
+    typer.echo(f"[{step_index}/{total_steps}] {label} cached: {path}", err=True)
+    payload.setdefault("cache_path", str(path))
+    return payload
+
+
 def _bootstrap(config_path: Path) -> Settings:
     settings = load_settings(config_path)
     configure_logging(settings.logging)
@@ -347,6 +362,7 @@ def run_pipeline(
     asr_device: str = typer.Option("auto", help="ASR device: auto, cpu, cuda, cuda:0, ..."),
     asr_compute_type: str = typer.Option("default", help="faster-whisper compute type: default, float16, int8, ..."),
     diarization_device: str = typer.Option("auto", help="Diarization device: auto, cpu, cuda, cuda:0, ..."),
+    use_cache: bool = typer.Option(True, help="Reuse existing cached step artifacts when available."),
 ) -> None:
     """Run the complete pipeline from a VOD file using project-local default paths."""
 
@@ -359,35 +375,50 @@ def run_pipeline(
 
     total_steps = 8
 
-    try:
-        probe_result = _run_with_progress(
-            1,
-            total_steps,
-            "Probe media",
-            lambda: probe_media(vod_path=str(resolved_vod_path), cache_dir=str(settings.pipeline.cache_dir)),
-        )
-        extract_result = _run_with_progress(
-            2,
-            total_steps,
-            "Extract audio tracks",
-            lambda: extract_audio_tracks(vod_path=str(resolved_vod_path), cache_dir=str(settings.pipeline.cache_dir)),
-        )
-        audio_track_path = _select_default_audio_track(extract_result)
+    cache_root = Path(settings.pipeline.cache_dir).expanduser().resolve()
+    ingest_dir = cache_root / "ingest" / resolved_vod_path.stem
 
-        asr_result = _run_with_progress(
-            3,
-            total_steps,
-            "Run ASR",
-            lambda: run_asr(
-                audio_path=audio_track_path,
-                cache_dir=str(settings.pipeline.cache_dir),
-                language=language,
-                model_size=model_size,
-                chunk_seconds=int(settings.pipeline.chunk_minutes * 60),
-                device=asr_device,
-                compute_type=asr_compute_type,
-            ),
-        )
+    try:
+        probe_cache_path = ingest_dir / "metadata.json"
+        probe_result = _load_cached_payload(probe_cache_path, "Probe media", 1, total_steps) if use_cache else None
+        if probe_result is None:
+            probe_result = _run_with_progress(
+                1,
+                total_steps,
+                "Probe media",
+                lambda: probe_media(vod_path=str(resolved_vod_path), cache_dir=str(settings.pipeline.cache_dir)),
+            )
+
+        extract_cache_path = ingest_dir / "audio_manifest.json"
+        extract_result = _load_cached_payload(extract_cache_path, "Extract audio tracks", 2, total_steps) if use_cache else None
+        if extract_result is None:
+            extract_result = _run_with_progress(
+                2,
+                total_steps,
+                "Extract audio tracks",
+                lambda: extract_audio_tracks(vod_path=str(resolved_vod_path), cache_dir=str(settings.pipeline.cache_dir)),
+            )
+
+        audio_track_path = _select_default_audio_track(extract_result)
+        audio_track_stem = Path(audio_track_path).stem
+
+        asr_cache_path = cache_root / "features" / "asr" / audio_track_stem / "transcript.json"
+        asr_result = _load_cached_payload(asr_cache_path, "Run ASR", 3, total_steps) if use_cache else None
+        if asr_result is None:
+            asr_result = _run_with_progress(
+                3,
+                total_steps,
+                "Run ASR",
+                lambda: run_asr(
+                    audio_path=audio_track_path,
+                    cache_dir=str(settings.pipeline.cache_dir),
+                    language=language,
+                    model_size=model_size,
+                    chunk_seconds=int(settings.pipeline.chunk_minutes * 60),
+                    device=asr_device,
+                    compute_type=asr_compute_type,
+                ),
+            )
 
         diarization_token = hf_auth_token or os.getenv("HF_TOKEN")
 
@@ -416,33 +447,45 @@ def run_pipeline(
                     audio_track_path=audio_track_path,
                 )
 
-        diarization_result = _run_with_progress(4, total_steps, "Run speaker diarization", _run_diarization_stage)
+        diarization_cache_path = cache_root / "features" / "diarization" / audio_track_stem / "diarization.json"
+        diarization_result = _load_cached_payload(diarization_cache_path, "Run speaker diarization", 4, total_steps) if use_cache else None
+        if diarization_result is None and use_cache:
+            fallback_cache = cache_root / "features" / "diarization" / audio_track_stem / "diarization_fallback.json"
+            diarization_result = _load_cached_payload(fallback_cache, "Run speaker diarization", 4, total_steps)
+        if diarization_result is None:
+            diarization_result = _run_with_progress(4, total_steps, "Run speaker diarization", _run_diarization_stage)
 
-        audio_events_result = _run_with_progress(
-            5,
-            total_steps,
-            "Detect audio events",
-            lambda: detect_audio_events(
-                audio_path=audio_track_path,
-                cache_dir=str(settings.pipeline.cache_dir),
-                window_seconds=settings.pipeline.window_seconds,
-                window_overlap_seconds=settings.pipeline.window_overlap_seconds,
-            ),
-        )
+        audio_events_cache_path = cache_root / "features" / "audio_events" / audio_track_stem / "audio_events.json"
+        audio_events_result = _load_cached_payload(audio_events_cache_path, "Detect audio events", 5, total_steps) if use_cache else None
+        if audio_events_result is None:
+            audio_events_result = _run_with_progress(
+                5,
+                total_steps,
+                "Detect audio events",
+                lambda: detect_audio_events(
+                    audio_path=audio_track_path,
+                    cache_dir=str(settings.pipeline.cache_dir),
+                    window_seconds=settings.pipeline.window_seconds,
+                    window_overlap_seconds=settings.pipeline.window_overlap_seconds,
+                ),
+            )
 
-        video_motion_result = _run_with_progress(
-            6,
-            total_steps,
-            "Analyze video motion",
-            lambda: analyze_video_motion(
-                vod_path=str(resolved_vod_path),
-                cache_dir=str(settings.pipeline.cache_dir),
-                analysis_fps=analysis_fps,
-                processing_width=motion_processing_width,
-                window_seconds=settings.pipeline.window_seconds,
-                window_overlap_seconds=settings.pipeline.window_overlap_seconds,
-            ),
-        )
+        video_motion_cache_path = cache_root / "features" / "video_motion" / resolved_vod_path.stem / "video_motion.json"
+        video_motion_result = _load_cached_payload(video_motion_cache_path, "Analyze video motion", 6, total_steps) if use_cache else None
+        if video_motion_result is None:
+            video_motion_result = _run_with_progress(
+                6,
+                total_steps,
+                "Analyze video motion",
+                lambda: analyze_video_motion(
+                    vod_path=str(resolved_vod_path),
+                    cache_dir=str(settings.pipeline.cache_dir),
+                    analysis_fps=analysis_fps,
+                    processing_width=motion_processing_width,
+                    window_seconds=settings.pipeline.window_seconds,
+                    window_overlap_seconds=settings.pipeline.window_overlap_seconds,
+                ),
+            )
 
         clips = _run_with_progress(
             7,

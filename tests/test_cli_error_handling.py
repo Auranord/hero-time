@@ -148,3 +148,61 @@ def test_run_command_passes_device_flags_to_asr_and_diarization(tmp_path: Path, 
     assert captured_asr == {"device": "cuda", "compute_type": "float16"}
     assert captured_diar == {"device": "cuda:0"}
     assert captured_motion == {"processing_width": 224}
+
+
+
+def test_run_command_reuses_cached_step_artifacts(tmp_path: Path, monkeypatch) -> None:
+    vod_path = tmp_path / "sample.mkv"
+    vod_path.write_bytes(b"data")
+
+    cache_root = tmp_path / "cache"
+    ingest_dir = cache_root / "ingest" / vod_path.stem
+    ingest_dir.mkdir(parents=True, exist_ok=True)
+
+    (ingest_dir / "metadata.json").write_text('{"metadata_path": "cached"}', encoding="utf-8")
+    (ingest_dir / "audio_manifest.json").write_text(
+        '{"tracks": [{"path": "' + str(tmp_path / "audio.wav") + '"}]}',
+        encoding="utf-8",
+    )
+
+    audio_stem = "audio"
+    (cache_root / "features" / "asr" / audio_stem).mkdir(parents=True, exist_ok=True)
+    (cache_root / "features" / "diarization" / audio_stem).mkdir(parents=True, exist_ok=True)
+    (cache_root / "features" / "audio_events" / audio_stem).mkdir(parents=True, exist_ok=True)
+    (cache_root / "features" / "video_motion" / vod_path.stem).mkdir(parents=True, exist_ok=True)
+
+    (cache_root / "features" / "asr" / audio_stem / "transcript.json").write_text("{}", encoding="utf-8")
+    (cache_root / "features" / "diarization" / audio_stem / "diarization.json").write_text("{}", encoding="utf-8")
+    (cache_root / "features" / "audio_events" / audio_stem / "audio_events.json").write_text("{}", encoding="utf-8")
+    (cache_root / "features" / "video_motion" / vod_path.stem / "video_motion.json").write_text("{}", encoding="utf-8")
+
+    class _Pipeline:
+        cache_dir = cache_root
+        chunk_minutes = 2
+        window_seconds = 30
+        window_overlap_seconds = 15
+        output_dir = tmp_path / "outputs"
+
+    class _Settings(_DummySettings):
+        pipeline = _Pipeline()
+
+    monkeypatch.setattr(cli, "_bootstrap", lambda _: _Settings())
+
+    monkeypatch.setattr(cli, "probe_media", lambda **_: (_ for _ in ()).throw(AssertionError("probe should be skipped")))
+    monkeypatch.setattr(cli, "extract_audio_tracks", lambda **_: (_ for _ in ()).throw(AssertionError("extract should be skipped")))
+    monkeypatch.setattr(cli, "run_asr", lambda **_: (_ for _ in ()).throw(AssertionError("asr should be skipped")))
+    monkeypatch.setattr(cli, "run_diarization", lambda **_: (_ for _ in ()).throw(AssertionError("diarization should be skipped")))
+    monkeypatch.setattr(cli, "detect_audio_events", lambda **_: (_ for _ in ()).throw(AssertionError("audio events should be skipped")))
+    monkeypatch.setattr(cli, "analyze_video_motion", lambda **_: (_ for _ in ()).throw(AssertionError("video motion should be skipped")))
+    monkeypatch.setattr(cli, "build_candidates_from_artifacts", lambda **_: [{"id": "clip-1"}])
+    monkeypatch.setattr(
+        cli,
+        "export_final_outputs",
+        lambda **_: {"json_path": Path("/tmp/out.json"), "csv_path": Path("/tmp/out.csv")},
+    )
+
+    result = CliRunner().invoke(cli.app, ["run", str(vod_path)])
+
+    assert result.exit_code == 0
+    assert "[1/8] Probe media cached" in result.output
+    assert "[6/8] Analyze video motion cached" in result.output
