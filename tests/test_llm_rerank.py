@@ -62,3 +62,17 @@ def test_rerank_top_n_candidates_only_updates_selected(monkeypatch: pytest.Monke
     assert "llm_score" not in out[0]
     assert out[1]["llm_score"] == pytest.approx(0.91)
     assert out[1]["llm_primary_type"] == "story"
+
+
+def test_format_prompt_contains_transcript_excerpt() -> None:
+    prompt = llm_rerank._format_prompt(
+        {
+            "start_seconds": 10,
+            "end_seconds": 30,
+            "base_score": 0.5,
+            "transcript_excerpt": "krass das war geil!",
+        }
+    )
+
+    assert "transcript_excerpt" in prompt
+    assert "krass das war geil!" in prompt
