@@ -12,6 +12,7 @@ def analyze_video_motion(
     window_seconds: int = 30,
     window_overlap_seconds: int = 15,
     scene_change_multiplier: float = 2.5,
+    processing_width: int = 320,
 ) -> dict[str, Any]:
     """Analyze low-FPS motion and scene-change intensity aligned to scoring windows."""
 
@@ -37,7 +38,7 @@ def analyze_video_motion(
 
     try:
         while True:
-            ok, frame = capture.read()
+            ok = capture.grab()
             if not ok:
                 break
 
@@ -45,7 +46,13 @@ def analyze_video_motion(
                 frame_index += 1
                 continue
 
-            timestamp_seconds = float(capture.get(cv2.CAP_PROP_POS_MSEC) / 1000.0)
+            ok, frame = capture.retrieve()
+            if not ok:
+                frame_index += 1
+                continue
+
+            timestamp_seconds = frame_index / native_fps if native_fps > 0 else float(capture.get(cv2.CAP_PROP_POS_MSEC) / 1000.0)
+            frame = _resize_for_motion(frame=frame, processing_width=processing_width, cv2_module=cv2)
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
             if prev_gray is None:
@@ -103,6 +110,7 @@ def analyze_video_motion(
             "std": round(motion_std, 6),
             "peak_count": len(motion_peaks),
         },
+        "processing_width": processing_width,
         "scene_change_threshold": round(scene_change_threshold, 6),
         "scene_change_count": len(scene_changes),
         "scene_change_rate": round(len(scene_changes) / duration_seconds, 6) if duration_seconds > 0 else 0.0,
@@ -120,6 +128,19 @@ def analyze_video_motion(
         **payload,
         "video_motion_path": str(artifact_path),
     }
+
+
+def _resize_for_motion(frame: Any, processing_width: int, cv2_module: Any) -> Any:
+    if processing_width <= 0:
+        return frame
+
+    height, width = frame.shape[:2]
+    if width <= processing_width:
+        return frame
+
+    scale = processing_width / float(width)
+    target_height = max(int(round(height * scale)), 1)
+    return cv2_module.resize(frame, (processing_width, target_height), interpolation=cv2_module.INTER_AREA)
 
 
 def _estimate_duration_seconds(capture: Any, samples: list[dict[str, Any]], native_fps: float) -> float:
